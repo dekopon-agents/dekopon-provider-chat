@@ -1,0 +1,56 @@
+apiVersion: dekopon.dev/brokerd/v1alpha1
+socketPath: SOCKET_PATH
+credentialsPath: broker-credentials.yaml
+policiesPath: policies.cedar
+strict: true
+providers:
+  - chat-provider.wasm
+agents:
+  fixture-agent:
+    credentials:
+      slack-history: slack-history-agent
+      discord-history: discord-history-agent
+principals:
+  test-user: { subjects: [slack.tfixture.ufixture, discord.123456789012345678] }
+identities:
+  - uid: TEST_UID
+    principal: test-gateway
+    actor:
+      type: service
+      principal: test-gateway
+    attestor:
+      namespaces: [slack.tfixture, discord.123456789012345678]
+capabilities:
+  chat:
+    capabilities:
+      chat.slack.history.read:
+        credential: slack-history
+        constraints:
+          timeoutMs: 10000
+          http:
+            allowedHosts: [slack.com]
+            allowedMethods: [GET]
+            maxRequests: 2
+            maxRequestBytes: 1024
+            maxResponseBytes: 524288
+            requestTemplates:
+              - method: GET
+                path: /api/conversations.replies
+                query:
+                  pinned: {channel: conversation.id, ts: conversation.thread}
+                  allowed: [limit, cursor]
+      chat.discord.history.read:
+        credential: discord-history
+        constraints:
+          timeoutMs: 10000
+          http:
+            allowedHosts: [discord.com]
+            allowedMethods: [GET]
+            maxRequests: 2
+            maxRequestBytes: 1024
+            maxResponseBytes: 524288
+            requestTemplates:
+              - method: GET
+                path: /api/v10/channels/{conversation.apiChannel}/messages
+                query:
+                  allowed: [limit, before]
