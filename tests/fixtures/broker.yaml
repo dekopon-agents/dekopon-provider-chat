@@ -1,0 +1,36 @@
+apiVersion: dekopon.dev/brokerd/v1alpha1
+socketPath: SOCKET_PATH
+credentialsPath: broker-credentials.yaml
+policiesPath: policies.cedar
+strict: true
+providers:
+  - chat-provider.wasm
+identities:
+  - uid: TEST_UID
+    principal: test-gateway
+    actor:
+      type: service
+      principal: test-gateway
+    attestor:
+      namespaces: [slack.test]
+capabilities:
+  chat:
+    credential: slack-history
+    constraints:
+      http:
+        allowedHosts: [slack.com]
+        allowedMethods: [GET]
+        maxRequests: 2
+        maxRequestBytes: 1024
+        maxResponseBytes: 65536
+    capabilities:
+      chat.slack.history.read:
+        constraints:
+          timeoutMs: 10000
+          http:
+            requestTemplates:
+              - method: GET
+                path: /api/conversations.replies
+                query:
+                  pinned: {channel: conversation.id, ts: conversation.thread}
+                  allowed: [limit, cursor]
