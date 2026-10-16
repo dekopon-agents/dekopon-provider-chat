@@ -166,7 +166,6 @@ struct Page {
     ok: bool,
     #[serde(default)]
     error: Option<String>,
-    #[serde(default)]
     messages: Vec<SlackMessage>,
     #[serde(default)]
     has_more: bool,
@@ -420,6 +419,12 @@ mod tests {
         });
         assert!(matches!(result, Err(HistoryError::FailedPage)));
         assert_eq!(calls, 2);
+    }
+
+    #[test]
+    fn native_missing_messages_cannot_masquerade_as_empty_history() {
+        let result = read_slack(1, &SLACK, &mut |_| response(200, json!({"ok":true})));
+        assert!(matches!(result, Err(HistoryError::InvalidResponse)));
     }
 
     #[test]
