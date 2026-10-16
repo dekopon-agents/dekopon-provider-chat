@@ -423,9 +423,6 @@ fn read_slack(
         }
         let page_messages = page.messages.ok_or(HistoryError::InvalidResponse)?;
         let length = page_messages.len();
-        if length > 200 {
-            return Err(HistoryError::InvalidResponse);
-        }
         for message in page_messages {
             if timestamp(&message.ts).is_none() {
                 return Err(HistoryError::InvalidResponse);
@@ -529,6 +526,26 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["newer", "newest"]
         );
+        assert!(result.truncated);
+    }
+
+    #[test]
+    fn native_slack_repeated_root_does_not_reject_a_full_second_page() {
+        let mut calls = 0;
+        let result = read_slack(1, &SLACK, &mut |_| {
+            calls += 1;
+            if calls == 1 {
+                response(200, json!({"ok":true,"has_more":true,"response_metadata":{"next_cursor":"next"},"messages":[
+                    {"ts":"1760000000.000001","text":"root"}
+                ]}))
+            } else {
+                let mut page = vec![json!({"ts":"1760000000.000001","text":"root"})];
+                page.extend((2..=201).map(|i| json!({"ts":format!("1760000000.{i:06}"),"text":format!("message-{i}")})));
+                response(200, json!({"ok":true,"messages":page}))
+            }
+        }).expect("full page with repeated root");
+        assert_eq!(calls, 2);
+        assert_eq!(result.messages[0].text, "message-201");
         assert!(result.truncated);
     }
 
