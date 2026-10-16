@@ -66,7 +66,7 @@ fn component_rejects_invalid_slack_count_and_native_reads_earlier_text()
     assert_eq!(sent.len(), 1);
     assert_eq!(
         sent[0].uri,
-        "https://slack.com/api/conversations.replies?limit=200"
+        "https://slack.com/api/conversations.replies?limit=20"
     );
     assert!(
         sent[0]

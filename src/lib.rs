@@ -141,7 +141,7 @@ pub struct SlackHistory;
 impl Capability for SlackHistory {
     type Provider = Chat;
     const NAME: &'static str = "slack.history.read";
-    const DESCRIPTION: &'static str = "Read the newest reachable Slack thread messages; a thread beyond two pages may hide its tail";
+    const DESCRIPTION: &'static str = "Read the newest reachable Slack thread messages; beyond two pages of min(200, max(20, 4*N)) the tail is unreachable";
     const EFFECT: EffectKind = EffectKind::ReadOnly;
     const RISK: RiskLevel = RiskLevel::Low;
     type Input = HistoryInput;
@@ -384,9 +384,10 @@ fn read_slack(
     let mut messages = Vec::new();
     let mut cursor = None::<String>;
     let mut truncated = false;
+    let page_limit = (usize::from(count) * 4).clamp(20, 200);
     for page_number in 0..2 {
         let mut uri = base
-            .join("/api/conversations.replies?limit=200")
+            .join(&format!("/api/conversations.replies?limit={page_limit}"))
             .map_err(|_| HistoryError::InvalidResponse)?;
         if let Some(ref cursor) = cursor {
             uri.push_str("&cursor=");
@@ -494,6 +495,80 @@ mod tests {
     }
 
     #[test]
+    fn native_slack_page_size_scales_with_count_on_both_requests() {
+        for (count, limit) in [(5, 20), (10, 40), (50, 200)] {
+            let mut calls = Vec::new();
+            let result = read_slack(count, &SLACK, &mut |request| {
+                calls.push(request.uri);
+                if calls.len() == 1 {
+                    response(200, json!({"ok":true,"has_more":true,"response_metadata":{"next_cursor":"next"},"messages":[
+                        {"ts":"1760000000.000001","text":"root"}
+                    ]}))
+                } else {
+                    response(200, json!({"ok":true,"messages":[
+                        {"ts":"1760000000.000001","text":"root"},
+                        {"ts":"1760000000.000002","text":"next"}
+                    ]}))
+                }
+            }).expect("scaled request");
+            assert_eq!(result.messages.len(), 2);
+            assert_eq!(
+                calls,
+                [
+                    format!("https://slack.com/api/conversations.replies?limit={limit}"),
+                    format!(
+                        "https://slack.com/api/conversations.replies?limit={limit}&cursor=next"
+                    ),
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn native_slack_smaller_count_recovers_after_host_byte_limit() {
+        let mut limits = Vec::new();
+        let exceeded = read_slack(50, &SLACK, &mut |request| {
+            limits.push(request.uri);
+            Err(HttpError {
+                code: HttpErrorCode::ResponseTooLarge,
+                message: "decoded body exceeds grant".into(),
+            })
+        });
+        assert!(matches!(exceeded, Err(HistoryError::TooLarge)));
+        let recovered = read_slack(5, &SLACK, &mut |request| {
+            limits.push(request.uri);
+            if request_limit(&limits[1]) <= 20 {
+                response(
+                    200,
+                    json!({"ok":true,"messages":[{"ts":"1760000000.000001","text":"reachable"}]}),
+                )
+            } else {
+                Err(HttpError {
+                    code: HttpErrorCode::ResponseTooLarge,
+                    message: "decoded body exceeds grant".into(),
+                })
+            }
+        })
+        .expect("smaller request fits the fixture ceiling");
+        assert_eq!(recovered.messages[0].text, "reachable");
+        assert_eq!(
+            limits,
+            [
+                "https://slack.com/api/conversations.replies?limit=200",
+                "https://slack.com/api/conversations.replies?limit=20",
+            ]
+        );
+    }
+
+    fn request_limit(uri: &str) -> u32 {
+        uri.split("limit=")
+            .nth(1)
+            .expect("limit query")
+            .parse()
+            .expect("numeric limit")
+    }
+
+    #[test]
     fn native_slack_repeated_root_keeps_latest_seen_messages() {
         let mut calls = Vec::new();
         let result = read_slack(2, &SLACK, &mut |request| {
@@ -514,8 +589,8 @@ mod tests {
         assert_eq!(
             calls,
             [
-                "https://slack.com/api/conversations.replies?limit=200",
-                "https://slack.com/api/conversations.replies?limit=200&cursor=next",
+                "https://slack.com/api/conversations.replies?limit=20",
+                "https://slack.com/api/conversations.replies?limit=20&cursor=next",
             ]
         );
         assert_eq!(
@@ -540,12 +615,12 @@ mod tests {
                 ]}))
             } else {
                 let mut page = vec![json!({"ts":"1760000000.000001","text":"root"})];
-                page.extend((2..=201).map(|i| json!({"ts":format!("1760000000.{i:06}"),"text":format!("message-{i}")})));
+                page.extend((2..=21).map(|i| json!({"ts":format!("1760000000.{i:06}"),"text":format!("message-{i}")})));
                 response(200, json!({"ok":true,"messages":page}))
             }
         }).expect("full page with repeated root");
         assert_eq!(calls, 2);
-        assert_eq!(result.messages[0].text, "message-201");
+        assert_eq!(result.messages[0].text, "message-21");
         assert!(result.truncated);
     }
 
@@ -568,8 +643,8 @@ mod tests {
         assert_eq!(
             calls,
             [
-                "https://slack.com/api/conversations.replies?limit=200",
-                "https://slack.com/api/conversations.replies?limit=200&cursor=abc%3D12",
+                "https://slack.com/api/conversations.replies?limit=20",
+                "https://slack.com/api/conversations.replies?limit=20&cursor=abc%3D12",
             ]
         );
         assert_eq!(
