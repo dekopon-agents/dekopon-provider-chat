@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from unittest.mock import patch
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 FIXTURE = ROOT / "tests" / "fixtures"
@@ -18,15 +19,47 @@ def command(*argv):
 
 
 def boot(config, ready=False):
-    with subprocess.Popen([BROKER, "--config", str(config)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) as proc:
+    proc = subprocess.Popen([BROKER, "--config", str(config)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
         if ready:
             deadline = time.monotonic() + 20
             while time.monotonic() < deadline and proc.poll() is None and not (config.parent / "broker.sock").exists():
                 time.sleep(0.1)
-            assert (config.parent / "broker.sock").exists(), proc.communicate(timeout=5)
+            if not (config.parent / "broker.sock").exists():
+                raise AssertionError("broker did not bind socket")
             proc.terminate()
         stdout, stderr = proc.communicate(timeout=25)
         return proc.returncode, stdout + stderr
+    except (subprocess.TimeoutExpired, AssertionError):
+        proc.kill()
+        proc.communicate(timeout=5)
+        raise
+
+
+def timeout_cleanup_witness():
+    class TimedOutBroker:
+        killed = False
+        calls = 0
+        returncode = -9
+
+        def communicate(self, timeout):
+            self.calls += 1
+            if not self.killed:
+                raise subprocess.TimeoutExpired("brokerd", timeout)
+            return "", ""
+
+        def kill(self):
+            self.killed = True
+
+    process = TimedOutBroker()
+    with patch("subprocess.Popen", return_value=process):
+        try:
+            boot(pathlib.Path("/tmp/unused-config.yaml"))
+        except subprocess.TimeoutExpired:
+            pass
+        else:
+            raise AssertionError("timeout must propagate")
+    assert process.killed and process.calls == 2, "timed-out broker must be reaped"
 
 
 def fixture():
@@ -44,6 +77,7 @@ def fixture():
 
 
 def main():
+    timeout_cleanup_witness()
     assert command("--version").stdout.strip() == "dekopon-brokerd 0.47.0"
     for only in ("slack", "discord"):
         temporary, path = fixture()

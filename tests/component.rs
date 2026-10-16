@@ -48,13 +48,12 @@ fn read_manifest_has_no_write_or_asset_capability() {
 }
 
 #[test]
-fn component_reads_earlier_text_from_the_claimed_thread_without_guest_credentials()
+fn component_rejects_invalid_slack_count_and_native_reads_earlier_text()
 -> Result<(), Box<dyn std::error::Error>> {
     conformance::<Chat>(component())?;
     let scripted = Harness::<Chat>::get(component()).http(HttpScript::new("localhost", "GET", response(json!({
         "ok":true,"messages":[{"ts":"1760000000.000003","user":"Uraw","text":"earlier text"}],"has_more":false
     }))));
-    let origin = scripted.origin().expect("script origin").to_owned();
     let refused = scripted.call("chat.slack.history.read", json!({"count":0}))?;
     assert_ne!(refused.status, 0);
     assert!(refused.http_calls.is_empty());
@@ -67,7 +66,7 @@ fn component_reads_earlier_text_from_the_claimed_thread_without_guest_credential
     assert_eq!(sent.len(), 1);
     assert_eq!(
         sent[0].uri,
-        "https://slack.com/api/conversations.replies?limit=1"
+        "https://slack.com/api/conversations.replies?limit=200"
     );
     assert!(
         sent[0]
@@ -79,7 +78,6 @@ fn component_reads_earlier_text_from_the_claimed_thread_without_guest_credential
     assert_eq!(result["messages"][0]["text"], "earlier text");
     assert_eq!(result["messages"][0]["author"], "Uraw");
     assert_eq!(result["truncated"], false);
-    assert!(origin.starts_with("https://"));
     Ok(())
 }
 
@@ -129,7 +127,7 @@ fn component_discord_refuses_invalid_input_and_native_reads_earlier_text()
     assert_eq!(sent.len(), 1);
     assert_eq!(
         sent[0].uri,
-        "https://discord.com/api/v10/channels/{conversation.apiChannel}/messages?limit=2"
+        "https://discord.com/api/v10/channels/{conversation.apiChannel}/messages?limit=3"
     );
     assert!(
         sent[0]

@@ -3,7 +3,7 @@ use dekopon_provider_sdk::provider::endpoint::Base;
 use dekopon_provider_sdk::provider::{
     Capability, Code, Failure, Http, Proposal, Provider, Stdout, Usage,
 };
-use dekopon_provider_sdk::provider::{HttpError, Request, Response};
+use dekopon_provider_sdk::provider::{HttpError, HttpErrorCode, Request, Response};
 use dekopon_provider_sdk::{EffectKind, RiskLevel};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -13,7 +13,6 @@ use std::io::Write;
 const SLACK: Base = Base::from_static("https://slack.com");
 const DISCORD: Base = Base::from_static("https://discord.com");
 const MAX_COUNT: u8 = 100;
-const MAX_BODY: usize = 64 * 1024;
 const MAX_TEXT: usize = 4096;
 
 #[derive(Parser)]
@@ -92,6 +91,7 @@ mod export {
 pub enum HistoryError {
     InvalidCount,
     Transport,
+    TooLarge,
     Permission,
     Throttled,
     Unavailable,
@@ -104,6 +104,7 @@ impl fmt::Display for HistoryError {
         f.write_str(match self {
             Self::InvalidCount => "N must be 1..100",
             Self::Transport => "history request failed",
+            Self::TooLarge => "history response too large; ask for fewer messages",
             Self::Permission => "history permission denied",
             Self::Throttled => "history throttled",
             Self::Unavailable => "history unavailable",
@@ -118,6 +119,7 @@ impl Failure for HistoryError {
         match self {
             Self::InvalidCount => Code::INVALID_INPUT,
             Self::Transport => Code::new("http-failed"),
+            Self::TooLarge => Code::new("response-too-large"),
             Self::Permission => Code::new("permission-denied"),
             Self::Throttled => Code::new("throttled"),
             Self::Unavailable => Code::new("history-unavailable"),
@@ -139,7 +141,7 @@ pub struct SlackHistory;
 impl Capability for SlackHistory {
     type Provider = Chat;
     const NAME: &'static str = "slack.history.read";
-    const DESCRIPTION: &'static str = "Read up to 100 messages from the attested Slack thread";
+    const DESCRIPTION: &'static str = "Read the newest reachable Slack thread messages; a thread beyond two pages may hide its tail";
     const EFFECT: EffectKind = EffectKind::ReadOnly;
     const RISK: RiskLevel = RiskLevel::Low;
     type Input = HistoryInput;
@@ -277,7 +279,7 @@ fn read_discord(
     let mut before = None::<String>;
     let mut truncated = false;
     for page_number in 0..2 {
-        let limit = (count as usize - messages.len()).min(50);
+        let limit = (count as usize + 1 - messages.len()).min(50);
         let mut uri = base
             .join(&format!(
                 "/api/v10/channels/{{conversation.apiChannel}}/messages?limit={limit}"
@@ -288,16 +290,13 @@ fn read_discord(
             uri.push_str(id);
         }
         let response = send(Request::new("GET", uri).map_err(|_| HistoryError::InvalidResponse)?)
-            .map_err(|_| HistoryError::Transport)?;
+            .map_err(history_http_error)?;
         match response.status {
             200..=299 => (),
             401 | 403 => return Err(HistoryError::Permission),
             429 => return Err(HistoryError::Throttled),
             404 | 410 => return Err(HistoryError::Unavailable),
             _ => return Err(HistoryError::FailedPage),
-        }
-        if response.body.len() > MAX_BODY {
-            return Err(HistoryError::InvalidResponse);
         }
         let page: Vec<DiscordMessage> =
             serde_json::from_slice(&response.body).map_err(|_| HistoryError::InvalidResponse)?;
@@ -335,17 +334,28 @@ fn read_discord(
         if !full {
             break;
         }
-        truncated = true;
-        if messages.len() == count as usize || page_number == 1 {
+        if messages.len() > count as usize || page_number == 1 {
             break;
         }
         before = oldest;
+    }
+    if messages.len() > count as usize {
+        messages.truncate(count as usize);
+        truncated = true;
     }
     messages.sort_by(|a, b| a.time.cmp(&b.time).then(a.id.cmp(&b.id)));
     Ok(History {
         messages,
         truncated,
     })
+}
+
+fn history_http_error(error: HttpError) -> HistoryError {
+    if error.code == HttpErrorCode::ResponseTooLarge {
+        HistoryError::TooLarge
+    } else {
+        HistoryError::Transport
+    }
 }
 
 fn bounded(value: &str, max: usize) -> String {
@@ -376,10 +386,7 @@ fn read_slack(
     let mut truncated = false;
     for page_number in 0..2 {
         let mut uri = base
-            .join(&format!(
-                "/api/conversations.replies?limit={}",
-                count as usize - messages.len()
-            ))
+            .join("/api/conversations.replies?limit=200")
             .map_err(|_| HistoryError::InvalidResponse)?;
         if let Some(ref cursor) = cursor {
             uri.push_str("&cursor=");
@@ -393,7 +400,7 @@ fn read_slack(
             }
         }
         let request = Request::new("GET", uri).map_err(|_| HistoryError::InvalidResponse)?;
-        let response = send(request).map_err(|_| HistoryError::Transport)?;
+        let response = send(request).map_err(history_http_error)?;
         match response.status {
             200..=299 => (),
             401 | 403 => return Err(HistoryError::Permission),
@@ -401,29 +408,30 @@ fn read_slack(
             404 | 410 => return Err(HistoryError::Unavailable),
             _ => return Err(HistoryError::FailedPage),
         }
-        if response.body.len() > MAX_BODY {
-            return Err(HistoryError::InvalidResponse);
-        }
         let page: Page =
             serde_json::from_slice(&response.body).map_err(|_| HistoryError::InvalidResponse)?;
         if !page.ok {
             return Err(match page.error.as_deref() {
                 Some("ratelimited") => HistoryError::Throttled,
-                Some("missing_scope" | "not_authed" | "not_in_channel" | "access_denied") => {
-                    HistoryError::Permission
-                }
+                Some(
+                    "missing_scope" | "not_authed" | "not_in_channel" | "access_denied"
+                    | "invalid_auth" | "token_revoked" | "account_inactive",
+                ) => HistoryError::Permission,
                 Some("channel_not_found" | "thread_not_found") => HistoryError::Unavailable,
                 _ => HistoryError::FailedPage,
             });
         }
         let page_messages = page.messages.ok_or(HistoryError::InvalidResponse)?;
         let length = page_messages.len();
-        if length > count as usize - messages.len() {
+        if length > 200 {
             return Err(HistoryError::InvalidResponse);
         }
         for message in page_messages {
             if timestamp(&message.ts).is_none() {
                 return Err(HistoryError::InvalidResponse);
+            }
+            if messages.iter().any(|seen: &Message| seen.id == message.ts) {
+                continue;
             }
             messages.push(Message {
                 id: bounded(&message.ts, 64),
@@ -447,8 +455,7 @@ fn read_slack(
         if !page.has_more {
             break;
         }
-        truncated = true;
-        if messages.len() == count as usize || page_number == 1 {
+        if page_number == 1 {
             break;
         }
         let next = page
@@ -466,6 +473,10 @@ fn read_slack(
         cursor = Some(next);
     }
     messages.sort_by_key(|message| timestamp(&message.time));
+    if messages.len() > count as usize {
+        messages.drain(..messages.len() - count as usize);
+        truncated = true;
+    }
     Ok(History {
         messages,
         truncated,
@@ -486,7 +497,43 @@ mod tests {
     }
 
     #[test]
-    fn native_pages_are_bounded_sorted_and_partial_only_with_evidence() {
+    fn native_slack_repeated_root_keeps_latest_seen_messages() {
+        let mut calls = Vec::new();
+        let result = read_slack(2, &SLACK, &mut |request| {
+            calls.push(request.uri);
+            if calls.len() == 1 {
+                response(200, json!({"ok":true,"has_more":true,"response_metadata":{"next_cursor":"next"},"messages":[
+                    {"ts":"1760000000.000001","user":"root","text":"root"},
+                    {"ts":"1760000000.000002","user":"U2","text":"older"}
+                ]}))
+            } else {
+                response(200, json!({"ok":true,"has_more":false,"messages":[
+                    {"ts":"1760000000.000001","user":"root","text":"root"},
+                    {"ts":"1760000000.000003","user":"U3","text":"newer"},
+                    {"ts":"1760000000.000004","user":"U4","text":"newest"}
+                ]}))
+            }
+        }).expect("two pages");
+        assert_eq!(
+            calls,
+            [
+                "https://slack.com/api/conversations.replies?limit=200",
+                "https://slack.com/api/conversations.replies?limit=200&cursor=next",
+            ]
+        );
+        assert_eq!(
+            result
+                .messages
+                .iter()
+                .map(|m| m.text.as_str())
+                .collect::<Vec<_>>(),
+            ["newer", "newest"]
+        );
+        assert!(result.truncated);
+    }
+
+    #[test]
+    fn native_slack_pages_sort_and_keep_descriptive_assets() {
         let mut calls = Vec::new();
         let result = read_slack(3, &SLACK, &mut |request| {
             calls.push(request.uri);
@@ -504,8 +551,8 @@ mod tests {
         assert_eq!(
             calls,
             [
-                "https://slack.com/api/conversations.replies?limit=3",
-                "https://slack.com/api/conversations.replies?limit=2&cursor=abc%3D12",
+                "https://slack.com/api/conversations.replies?limit=200",
+                "https://slack.com/api/conversations.replies?limit=200&cursor=abc%3D12",
             ]
         );
         assert_eq!(
@@ -516,7 +563,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["first", "second", "third"]
         );
-        assert!(result.truncated);
+        assert!(!result.truncated);
         let serialized = serde_json::to_value(&result).expect("output");
         assert_eq!(serialized["messages"][2]["assets"][0]["available"], false);
         assert!(serialized["messages"][2]["assets"][0]["size"].is_null());
@@ -548,6 +595,21 @@ mod tests {
                 json!({"ok":false,"error":"thread_not_found"}),
                 HistoryError::Unavailable,
             ),
+            (
+                200,
+                json!({"ok":false,"error":"invalid_auth"}),
+                HistoryError::Permission,
+            ),
+            (
+                200,
+                json!({"ok":false,"error":"token_revoked"}),
+                HistoryError::Permission,
+            ),
+            (
+                200,
+                json!({"ok":false,"error":"account_inactive"}),
+                HistoryError::Permission,
+            ),
         ] {
             assert!(
                 matches!(read_slack(1, &SLACK, &mut |_| response(status, body.clone())), Err(e) if e == expected)
@@ -567,6 +629,22 @@ mod tests {
         });
         assert!(matches!(result, Err(HistoryError::FailedPage)));
         assert_eq!(calls, 2);
+    }
+
+    #[test]
+    fn native_slack_accepts_page_above_former_guest_byte_limit() {
+        let long_text = "a".repeat(70 * 1024);
+        let result = read_slack(1, &SLACK, &mut |_| {
+            response(
+                200,
+                json!({"ok":true,"messages":[
+                    {"ts":"1760000000.000001","user":"U1","text":long_text}
+                ]}),
+            )
+        })
+        .expect("broker-bounded page");
+        assert_eq!(result.messages[0].text.len(), MAX_TEXT);
+        assert!(!result.truncated);
     }
 
     #[test]
@@ -593,14 +671,17 @@ mod tests {
         let result = read_discord(51, &DISCORD, &mut |request| {
             calls.push(request.uri);
             if calls.len() == 1 { response(200, json!(page)) } else {
-                response(200, json!([{"id":"150","author":{"id":"raw-first"},"timestamp":"2026-01-01T00:00:00Z","content":"first"}]))
+                response(200, json!([
+                    {"id":"150","author":{"id":"raw-first"},"timestamp":"2026-01-01T00:00:00Z","content":"first"},
+                    {"id":"149","author":{"id":"raw-oldest"},"timestamp":"2025-12-31T00:00:00Z","content":"older"}
+                ]))
             }
         }).expect("bounded read");
         assert_eq!(
             calls,
             [
                 "https://discord.com/api/v10/channels/{conversation.apiChannel}/messages?limit=50",
-                "https://discord.com/api/v10/channels/{conversation.apiChannel}/messages?limit=1&before=151",
+                "https://discord.com/api/v10/channels/{conversation.apiChannel}/messages?limit=2&before=151",
             ]
         );
         assert_eq!(result.messages.len(), 51);
@@ -613,7 +694,7 @@ mod tests {
     }
 
     #[test]
-    fn native_discord_empty_errors_failed_page_and_decoded_byte_limit() {
+    fn native_discord_empty_errors_failed_page_and_host_byte_failure() {
         let empty = read_discord(2, &DISCORD, &mut |_| response(200, json!([]))).expect("empty");
         assert!(empty.messages.is_empty());
         assert!(!empty.truncated);
@@ -634,12 +715,22 @@ mod tests {
             )),
             Err(HistoryError::InvalidResponse)
         ));
-        let oversized = json!([{"id":"123","author":{"id":"raw"},
-            "timestamp":"2026-01-01T00:00:00Z","content":"x".repeat(MAX_BODY)}]);
-        assert!(oversized.to_string().len() > MAX_BODY);
+        let oversized = HttpError {
+            code: HttpErrorCode::ResponseTooLarge,
+            message: "decoded response exceeded broker grant".into(),
+        };
         assert!(matches!(
-            read_discord(1, &DISCORD, &mut |_| response(200, oversized.clone())),
-            Err(HistoryError::InvalidResponse)
+            read_discord(1, &DISCORD, &mut |_| Err(oversized.clone())),
+            Err(HistoryError::TooLarge)
+        ));
+        assert_eq!(
+            HistoryError::TooLarge.code(),
+            Code::new("response-too-large")
+        );
+        assert!(HistoryError::TooLarge.to_string().contains("ask for fewer"));
+        assert!(matches!(
+            read_slack(1, &SLACK, &mut |_| Err(oversized.clone())),
+            Err(HistoryError::TooLarge)
         ));
         let page: Vec<_> = (151..=200)
             .rev()
@@ -660,17 +751,5 @@ mod tests {
         });
         assert!(matches!(failed, Err(HistoryError::FailedPage)));
         assert_eq!(calls, 2);
-    }
-
-    #[test]
-    fn native_decoded_response_limit_refuses_oversized_page() {
-        let result = read_slack(1, &SLACK, &mut |_| {
-            Ok(Response {
-                status: 200,
-                headers: vec![],
-                body: vec![b'x'; MAX_BODY + 1],
-            })
-        });
-        assert!(matches!(result, Err(HistoryError::InvalidResponse)));
     }
 }

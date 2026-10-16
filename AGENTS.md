@@ -13,11 +13,11 @@ The Chat provider for Dekopon is one Wasm component with platform-specific, read
 - Only broker-attested conversation slots select a channel/thread. No model-facing channel, thread, workspace or URL input; no generic HTTP passthrough or history fallback.
 - Slack reads only `conversations.replies` at the claimed thread; Discord reads only the attested API channel. Each capability has its own credential binding and GET request template. No write capability or provider asset fetch.
 - The guest never sets `authorization`. The broker injects destination-bound credentials after request validation. Do not expose tokens, private response headers, URLs or platform error bodies in outputs.
-- A history attachment is metadata only (`available:false`); it cannot be fetched by this provider. Bound messages, pages, decoded response bytes and output text. A failed page is not an empty success.
+- A history attachment is metadata only (`available:false`); it cannot be fetched by this provider. Bound messages, pages and output text; decoded response bytes are bounded by the broker's `maxResponseBytes` grant, not by a separate guest cap. A failed page is not an empty success.
 
 ## Build and verify
 
-The shared [provider-workflows](https://github.com/dekopon-agents/provider-workflows) CI runs `ci / validate`. Clone it as a sibling if absent. Run these steps before pushing:
+The shared [provider-workflows](https://github.com/dekopon-agents/provider-workflows) CI runs `ci / validate`. From the provider checkout, clone it as a sibling if absent with `git clone --depth 1 https://github.com/dekopon-agents/provider-workflows ../provider-workflows`. Run these steps before pushing:
 
 ```console
 cargo fmt --all --check
@@ -25,7 +25,7 @@ cargo deny --all-features check bans licenses sources advisories
 cargo clippy -p dekopon-chat-provider --all-targets --locked -- -D warnings
 cargo clippy -p dekopon-chat-provider --lib --target wasm32-unknown-unknown --locked -- -D warnings
 RUSTDOCFLAGS='-D warnings' cargo doc -p dekopon-chat-provider --no-deps --locked
-if test -x ../provider-workflows/build.sh; then ../provider-workflows/build.sh; else ../../provider-workflows/build.sh; fi
+../provider-workflows/build.sh
 DEKOPON_PROVIDER_COMPONENT="$PWD/chat-provider.wasm" cargo test -p dekopon-chat-provider --locked
 python3 tests/verify_broker.py
 ```
@@ -35,6 +35,6 @@ python3 tests/verify_broker.py
 ## Change rules
 
 - No comments or doc comments by default except when core's comments rule warrants them. Clap `///` is CLI help text.
-- Exact SDK and testkit pins move together. Regenerate Cargo.lock with Cargo.
+- The seven `=0.47.0` Dekopon pins (SDK, testkit, broker, core, policy, HTTP host and capability) and `tests/verify_broker.py`'s brokerd 0.47.0 version check move together. Regenerate Cargo.lock with Cargo.
 - Leave CHANGELOG.md for release prep. User-visible PR commits carry one physical `Changelog:` trailer per entry.
 - No live tests, credential changes, grants, publication or rollout in a source PR.

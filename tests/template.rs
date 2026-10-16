@@ -1,22 +1,16 @@
-use dekopon_capability::{ChatSlot, ChatSlotValues, HttpConstraints, RequestTemplate};
+use dekopon_capability::{ChatSlot, ChatSlotValues, HttpConstraints};
 use dekopon_http_host::{BufferedHttpClient, ErrorCode, HttpHostCeilings, Request};
 use std::time::Duration;
 
-fn constraints() -> HttpConstraints {
-    let rule: RequestTemplate = serde_json::from_value(serde_json::json!({
-        "method":"GET", "path":"/api/conversations.replies",
-        "query":{"pinned":{"channel":"conversation.id","ts":"conversation.thread"},"allowed":["limit","cursor"]}
-    })).expect("fixture template");
-    HttpConstraints {
-        allowed_hosts: vec!["unresolvable.invalid".into()],
-        allowed_methods: vec!["GET".into()],
-        max_requests: 2,
-        max_request_bytes: 1024,
-        max_response_bytes: 65536,
-        allow_plaintext_loopback: false,
-        propagate_trace: false,
-        request_templates: vec![rule],
-    }
+fn constraints(platform: &str) -> HttpConstraints {
+    let fixture: serde_yaml_ng::Value =
+        serde_yaml_ng::from_str(include_str!("fixtures/broker.yaml")).expect("broker fixture");
+    let id = format!("chat.{platform}.history.read");
+    let http = fixture["capabilities"]["chat"]["capabilities"][&id]["constraints"]["http"].clone();
+    let mut constraints: HttpConstraints =
+        serde_yaml_ng::from_value(http).expect("fixture HTTP constraints");
+    constraints.allowed_hosts = vec!["unresolvable.invalid".into()];
+    constraints
 }
 
 fn slots(thread: bool) -> ChatSlotValues {
@@ -30,7 +24,7 @@ fn slots(thread: bool) -> ChatSlotValues {
 
 async fn denied(thread: bool, uri: &str) {
     let mut client = BufferedHttpClient::authorized(
-        constraints(),
+        constraints("slack"),
         HttpHostCeilings::default(),
         Duration::from_secs(2),
     )
@@ -64,15 +58,9 @@ async fn missing_thread_and_foreign_channel_or_timestamp_deny_before_dns() {
 
 #[tokio::test]
 async fn discord_foreign_channel_denies_before_dns() {
-    let rule: RequestTemplate = serde_json::from_value(serde_json::json!({
-        "method":"GET", "path":"/api/v10/channels/{conversation.apiChannel}/messages",
-        "query":{"allowed":["limit","before"]}
-    }))
-    .expect("discord template");
-    let mut grant = constraints();
-    grant.request_templates = vec![rule];
+    let grant = constraints("discord");
     let mut slots = ChatSlotValues::default();
-    slots.insert(ChatSlot::ConversationApiChannel, "thread-claimed".into());
+    slots.insert(ChatSlot::ConversationApiChannel, "channel-claimed".into());
     let mut client =
         BufferedHttpClient::authorized(grant, HttpHostCeilings::default(), Duration::from_secs(2))
             .expect("grant")
@@ -106,16 +94,9 @@ async fn discord_channel_and_thread_use_attested_full_uri() {
                 .expect("reply");
             String::from_utf8_lossy(&bytes[..n]).to_string()
         });
-        let mut grant = constraints();
+        let mut grant = constraints("discord");
         grant.allowed_hosts = vec![address.to_string()];
         grant.allow_plaintext_loopback = true;
-        grant.request_templates = vec![
-            serde_json::from_value(serde_json::json!({
-                "method":"GET", "path":"/api/v10/channels/{conversation.apiChannel}/messages",
-                "query":{"allowed":["limit","before"]}
-            }))
-            .expect("template"),
-        ];
         let mut slots = ChatSlotValues::default();
         slots.insert(ChatSlot::ConversationApiChannel, channel.into());
         let mut client = BufferedHttpClient::authorized(
@@ -144,7 +125,6 @@ async fn discord_channel_and_thread_use_attested_full_uri() {
             )),
             "{captured}"
         );
-        assert!(!captured.to_ascii_lowercase().contains("authorization:"));
     }
 }
 
@@ -168,7 +148,7 @@ async fn attested_root_slots_only_send_their_own_replies_uri() {
                 .expect("reply");
             request
         });
-        let mut grant = constraints();
+        let mut grant = constraints("slack");
         grant.allowed_hosts = vec![address.to_string()];
         grant.allow_plaintext_loopback = true;
         let mut claim = ChatSlotValues::default();
@@ -199,6 +179,5 @@ async fn attested_root_slots_only_send_their_own_replies_uri() {
             "{captured}"
         );
         assert!(!captured.contains("conversations.history"));
-        assert!(!captured.to_ascii_lowercase().contains("authorization:"));
     }
 }

@@ -32,7 +32,7 @@ capabilities:
             allowedMethods: [GET]
             maxRequests: 2
             maxRequestBytes: 1024
-            maxResponseBytes: 65536
+            maxResponseBytes: 524288
             requestTemplates:
               - method: GET
                 path: /api/conversations.replies
@@ -48,7 +48,7 @@ capabilities:
             allowedMethods: [GET]
             maxRequests: 2
             maxRequestBytes: 1024
-            maxResponseBytes: 65536
+            maxResponseBytes: 524288
             requestTemplates:
               - method: GET
                 path: /api/v10/channels/{conversation.apiChannel}/messages
