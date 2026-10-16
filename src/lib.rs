@@ -279,7 +279,7 @@ fn read_discord(
     let mut before = None::<String>;
     let mut truncated = false;
     for page_number in 0..2 {
-        let limit = (count as usize + 1 - messages.len()).min(50);
+        let limit = (count as usize + 1 - messages.len()).min(51);
         let mut uri = base
             .join(&format!(
                 "/api/v10/channels/{{conversation.apiChannel}}/messages?limit={limit}"
@@ -746,42 +746,52 @@ mod tests {
     }
 
     #[test]
-    fn native_discord_pages_bound_count_and_preserve_descriptive_assets() {
-        let page: Vec<_> = (151..=200)
+    fn native_discord_two_pages_observe_older_message_at_max_count() {
+        let first: Vec<_> = (150..=200)
             .rev()
             .map(|id| {
                 json!({
                     "id": id.to_string(), "author":{"id":"raw-user"},
                     "timestamp": format!("2026-01-01T00:00:{:02}Z", id - 150),
-                    "content": "earlier text", "attachments": if id == 200 {
+                    "content": format!("message-{id}"), "attachments": if id == 200 {
                         vec![json!({"id":"F1","filename":"photo.png","content_type":"image/png"})]
                     } else { vec![] }
                 })
             })
             .collect();
+        let second: Vec<_> = (100..=149)
+            .rev()
+            .map(|id| {
+                json!({
+                    "id": id.to_string(), "author":{"id":"raw-user"},
+                    "timestamp": format!("2025-12-31T00:00:{:02}Z", id - 100),
+                    "content": format!("message-{id}")
+                })
+            })
+            .collect();
         let mut calls = Vec::new();
-        let result = read_discord(51, &DISCORD, &mut |request| {
+        let result = read_discord(100, &DISCORD, &mut |request| {
             calls.push(request.uri);
-            if calls.len() == 1 { response(200, json!(page)) } else {
-                response(200, json!([
-                    {"id":"150","author":{"id":"raw-first"},"timestamp":"2026-01-01T00:00:00Z","content":"first"},
-                    {"id":"149","author":{"id":"raw-oldest"},"timestamp":"2025-12-31T00:00:00Z","content":"older"}
-                ]))
+            if calls.len() == 1 {
+                response(200, json!(first))
+            } else {
+                response(200, json!(second))
             }
-        }).expect("bounded read");
+        })
+        .expect("bounded two-page read");
         assert_eq!(
             calls,
             [
-                "https://discord.com/api/v10/channels/{conversation.apiChannel}/messages?limit=50",
-                "https://discord.com/api/v10/channels/{conversation.apiChannel}/messages?limit=2&before=151",
+                "https://discord.com/api/v10/channels/{conversation.apiChannel}/messages?limit=51",
+                "https://discord.com/api/v10/channels/{conversation.apiChannel}/messages?limit=50&before=150",
             ]
         );
-        assert_eq!(result.messages.len(), 51);
-        assert_eq!(result.messages[0].text, "first");
-        assert_eq!(result.messages[50].author, "raw-user");
+        assert_eq!(result.messages.len(), 100);
+        assert_eq!(result.messages[0].text, "message-101");
+        assert_eq!(result.messages[99].author, "raw-user");
         let output = serde_json::to_value(&result).expect("output");
-        assert_eq!(output["messages"][50]["assets"][0]["available"], false);
-        assert!(output["messages"][50]["assets"][0]["size"].is_null());
+        assert_eq!(output["messages"][99]["assets"][0]["available"], false);
+        assert!(output["messages"][99]["assets"][0]["size"].is_null());
         assert!(result.truncated);
     }
 
@@ -824,7 +834,7 @@ mod tests {
             read_slack(1, &SLACK, &mut |_| Err(oversized.clone())),
             Err(HistoryError::TooLarge)
         ));
-        let page: Vec<_> = (151..=200)
+        let page: Vec<_> = (150..=200)
             .rev()
             .map(|id| {
                 json!({
@@ -833,7 +843,7 @@ mod tests {
             })
             .collect();
         let mut calls = 0;
-        let failed = read_discord(51, &DISCORD, &mut |_| {
+        let failed = read_discord(52, &DISCORD, &mut |_| {
             calls += 1;
             if calls == 1 {
                 response(200, json!(page))

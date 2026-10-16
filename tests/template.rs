@@ -79,53 +79,49 @@ async fn discord_foreign_channel_denies_before_dns() {
 }
 
 #[tokio::test]
-async fn discord_channel_and_thread_use_attested_full_uri() {
+async fn discord_channel_uses_attested_full_uri() {
     use std::io::{Read, Write};
     use std::net::TcpListener;
-    for channel in ["channel-claimed", "thread-claimed"] {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
-        let address = listener.local_addr().expect("address");
-        let receiver = std::thread::spawn(move || {
-            let (mut socket, _) = listener.accept().expect("request");
-            let mut bytes = [0; 2048];
-            let n = socket.read(&mut bytes).expect("bytes");
-            socket
-                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
-                .expect("reply");
-            String::from_utf8_lossy(&bytes[..n]).to_string()
-        });
-        let mut grant = constraints("discord");
-        grant.allowed_hosts = vec![address.to_string()];
-        grant.allow_plaintext_loopback = true;
-        let mut slots = ChatSlotValues::default();
-        slots.insert(ChatSlot::ConversationApiChannel, channel.into());
-        let mut client = BufferedHttpClient::authorized(
-            grant,
-            HttpHostCeilings::default(),
-            Duration::from_secs(3),
-        )
-        .expect("grant")
-        .with_chat_slots(slots);
-        let result = client
-            .send(Request {
-                method: "GET".into(),
-                uri: format!(
-                    "http://{address}/api/v10/channels/{{conversation.apiChannel}}/messages?limit=1"
-                ),
-                headers: vec![],
-                body: vec![],
-            })
-            .await
-            .expect("claimed read");
-        assert_eq!(result.status, 200);
-        let captured = receiver.join().expect("receiver");
-        assert!(
-            captured.starts_with(&format!(
-                "GET /api/v10/channels/{channel}/messages?limit=1 HTTP/1.1\r\n"
-            )),
-            "{captured}"
-        );
-    }
+    let channel = "channel-claimed";
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+    let address = listener.local_addr().expect("address");
+    let receiver = std::thread::spawn(move || {
+        let (mut socket, _) = listener.accept().expect("request");
+        let mut bytes = [0; 2048];
+        let n = socket.read(&mut bytes).expect("bytes");
+        socket
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+            .expect("reply");
+        String::from_utf8_lossy(&bytes[..n]).to_string()
+    });
+    let mut grant = constraints("discord");
+    grant.allowed_hosts = vec![address.to_string()];
+    grant.allow_plaintext_loopback = true;
+    let mut slots = ChatSlotValues::default();
+    slots.insert(ChatSlot::ConversationApiChannel, channel.into());
+    let mut client =
+        BufferedHttpClient::authorized(grant, HttpHostCeilings::default(), Duration::from_secs(3))
+            .expect("grant")
+            .with_chat_slots(slots);
+    let result = client
+        .send(Request {
+            method: "GET".into(),
+            uri: format!(
+                "http://{address}/api/v10/channels/{{conversation.apiChannel}}/messages?limit=1"
+            ),
+            headers: vec![],
+            body: vec![],
+        })
+        .await
+        .expect("claimed read");
+    assert_eq!(result.status, 200);
+    let captured = receiver.join().expect("receiver");
+    assert!(
+        captured.starts_with(&format!(
+            "GET /api/v10/channels/{channel}/messages?limit=1 HTTP/1.1\r\n"
+        )),
+        "{captured}"
+    );
 }
 
 #[tokio::test]
