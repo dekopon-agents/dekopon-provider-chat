@@ -19,7 +19,7 @@ identities:
       type: service
       principal: test-gateway
     attestor:
-      namespaces: [slack.test]
+      namespaces: [slack.tfixture, discord.123456789012345678]
 capabilities:
   chat:
     capabilities:

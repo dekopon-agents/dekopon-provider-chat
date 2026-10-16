@@ -634,12 +634,11 @@ mod tests {
             )),
             Err(HistoryError::InvalidResponse)
         ));
+        let oversized = json!([{"id":"123","author":{"id":"raw"},
+            "timestamp":"2026-01-01T00:00:00Z","content":"x".repeat(MAX_BODY)}]);
+        assert!(oversized.to_string().len() > MAX_BODY);
         assert!(matches!(
-            read_discord(1, &DISCORD, &mut |_| Ok(Response {
-                status: 200,
-                headers: vec![],
-                body: vec![b'x'; MAX_BODY + 1]
-            })),
+            read_discord(1, &DISCORD, &mut |_| response(200, oversized.clone())),
             Err(HistoryError::InvalidResponse)
         ));
         let page: Vec<_> = (151..=200)
