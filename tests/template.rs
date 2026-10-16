@@ -63,6 +63,92 @@ async fn missing_thread_and_foreign_channel_or_timestamp_deny_before_dns() {
 }
 
 #[tokio::test]
+async fn discord_foreign_channel_denies_before_dns() {
+    let rule: RequestTemplate = serde_json::from_value(serde_json::json!({
+        "method":"GET", "path":"/api/v10/channels/{conversation.apiChannel}/messages",
+        "query":{"allowed":["limit","before"]}
+    }))
+    .expect("discord template");
+    let mut grant = constraints();
+    grant.request_templates = vec![rule];
+    let mut slots = ChatSlotValues::default();
+    slots.insert(ChatSlot::ConversationApiChannel, "thread-claimed".into());
+    let mut client =
+        BufferedHttpClient::authorized(grant, HttpHostCeilings::default(), Duration::from_secs(2))
+            .expect("grant")
+            .with_chat_slots(slots);
+    let err = client
+        .send(Request {
+            method: "GET".into(),
+            uri: "https://unresolvable.invalid/api/v10/channels/foreign/messages?limit=1".into(),
+            headers: vec![],
+            body: vec![],
+        })
+        .await
+        .expect_err("foreign channel must deny");
+    assert!(matches!(err.code, ErrorCode::Denied));
+    assert!(client.into_evidence().is_empty());
+}
+
+#[tokio::test]
+async fn discord_channel_and_thread_use_attested_full_uri() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    for channel in ["channel-claimed", "thread-claimed"] {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+        let address = listener.local_addr().expect("address");
+        let receiver = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().expect("request");
+            let mut bytes = [0; 2048];
+            let n = socket.read(&mut bytes).expect("bytes");
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                .expect("reply");
+            String::from_utf8_lossy(&bytes[..n]).to_string()
+        });
+        let mut grant = constraints();
+        grant.allowed_hosts = vec![address.to_string()];
+        grant.allow_plaintext_loopback = true;
+        grant.request_templates = vec![
+            serde_json::from_value(serde_json::json!({
+                "method":"GET", "path":"/api/v10/channels/{conversation.apiChannel}/messages",
+                "query":{"allowed":["limit","before"]}
+            }))
+            .expect("template"),
+        ];
+        let mut slots = ChatSlotValues::default();
+        slots.insert(ChatSlot::ConversationApiChannel, channel.into());
+        let mut client = BufferedHttpClient::authorized(
+            grant,
+            HttpHostCeilings::default(),
+            Duration::from_secs(3),
+        )
+        .expect("grant")
+        .with_chat_slots(slots);
+        let result = client
+            .send(Request {
+                method: "GET".into(),
+                uri: format!(
+                    "http://{address}/api/v10/channels/{{conversation.apiChannel}}/messages?limit=1"
+                ),
+                headers: vec![],
+                body: vec![],
+            })
+            .await
+            .expect("claimed read");
+        assert_eq!(result.status, 200);
+        let captured = receiver.join().expect("receiver");
+        assert!(
+            captured.starts_with(&format!(
+                "GET /api/v10/channels/{channel}/messages?limit=1 HTTP/1.1\r\n"
+            )),
+            "{captured}"
+        );
+        assert!(!captured.to_ascii_lowercase().contains("authorization:"));
+    }
+}
+
+#[tokio::test]
 async fn attested_root_slots_only_send_their_own_replies_uri() {
     use std::io::{Read, Write};
     use std::net::TcpListener;

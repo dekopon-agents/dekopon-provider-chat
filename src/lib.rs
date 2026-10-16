@@ -11,6 +11,7 @@ use std::fmt;
 use std::io::Write;
 
 const SLACK: Base = Base::from_static("https://slack.com");
+const DISCORD: Base = Base::from_static("https://discord.com");
 const MAX_COUNT: u8 = 100;
 const MAX_BODY: usize = 64 * 1024;
 const MAX_TEXT: usize = 4096;
@@ -25,6 +26,10 @@ pub struct Args {
 #[derive(Subcommand)]
 enum Platform {
     Slack {
+        #[command(subcommand)]
+        action: Action,
+    },
+    Discord {
         #[command(subcommand)]
         action: Action,
     },
@@ -50,19 +55,31 @@ impl Provider for Chat {
     const COMMAND_WORDS: &'static [&'static str] = &["chat"];
     const DESCRIPTION: &'static str = "Read text from an attested chat conversation";
     type Args = Args;
-    type Capabilities = (SlackHistory,);
+    type Capabilities = (SlackHistory, DiscordHistory);
 
     fn propose(args: Args, _stdin_piped: bool) -> Result<Proposal<Self>, Usage> {
-        let Platform::Slack {
-            action:
-                Action::Get {
-                    selection: Selection::Last { count },
-                },
-        } = args.platform;
+        let (count, discord) = match args.platform {
+            Platform::Slack {
+                action:
+                    Action::Get {
+                        selection: Selection::Last { count },
+                    },
+            } => (count, false),
+            Platform::Discord {
+                action:
+                    Action::Get {
+                        selection: Selection::Last { count },
+                    },
+            } => (count, true),
+        };
         if count == 0 || count > MAX_COUNT {
-            return Err(Usage::new("chat slack get last: N must be 1..100"));
+            return Err(Usage::new("chat get last: N must be 1..100"));
         }
-        Ok(Proposal::to::<SlackHistory>(HistoryInput { count }))
+        if discord {
+            Ok(Proposal::to::<DiscordHistory>(HistoryInput { count }))
+        } else {
+            Ok(Proposal::to::<SlackHistory>(HistoryInput { count }))
+        }
     }
 }
 
@@ -137,6 +154,27 @@ impl Capability for SlackHistory {
     }
 }
 
+pub struct DiscordHistory;
+
+impl Capability for DiscordHistory {
+    type Provider = Chat;
+    const NAME: &'static str = "discord.history.read";
+    const DESCRIPTION: &'static str =
+        "Read up to 100 messages from the attested Discord channel or thread";
+    const EFFECT: EffectKind = EffectKind::ReadOnly;
+    const RISK: RiskLevel = RiskLevel::Low;
+    type Input = HistoryInput;
+    type Needs = Http;
+    type Error = HistoryError;
+
+    fn run(input: Self::Input, http: Self::Needs, out: &mut Stdout) -> Result<(), Self::Error> {
+        let result = read_discord(input.count, &DISCORD, &mut |request| http.send(request))?;
+        serde_json::to_writer(&mut *out, &result).map_err(|_| HistoryError::InvalidResponse)?;
+        out.write_all(b"\n")
+            .map_err(|_| HistoryError::InvalidResponse)
+    }
+}
+
 #[derive(Serialize)]
 struct History {
     messages: Vec<Message>,
@@ -199,6 +237,115 @@ struct SlackFile {
     #[serde(default)]
     mimetype: String,
     size: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct DiscordMessage {
+    id: String,
+    #[serde(default)]
+    content: String,
+    timestamp: String,
+    author: DiscordAuthor,
+    #[serde(default)]
+    attachments: Vec<DiscordAttachment>,
+}
+
+#[derive(Deserialize)]
+struct DiscordAuthor {
+    id: String,
+}
+
+#[derive(Deserialize)]
+struct DiscordAttachment {
+    id: String,
+    #[serde(default)]
+    filename: String,
+    #[serde(default)]
+    content_type: String,
+    size: Option<u64>,
+}
+
+fn read_discord(
+    count: u8,
+    base: &Base,
+    send: &mut dyn FnMut(Request) -> Result<Response, HttpError>,
+) -> Result<History, HistoryError> {
+    if count == 0 || count > MAX_COUNT {
+        return Err(HistoryError::InvalidCount);
+    }
+    let mut messages = Vec::new();
+    let mut before = None::<String>;
+    let mut truncated = false;
+    for page_number in 0..2 {
+        let limit = (count as usize - messages.len()).min(50);
+        let mut uri = base
+            .join(&format!(
+                "/api/v10/channels/{{conversation.apiChannel}}/messages?limit={limit}"
+            ))
+            .map_err(|_| HistoryError::InvalidResponse)?;
+        if let Some(ref id) = before {
+            uri.push_str("&before=");
+            uri.push_str(id);
+        }
+        let response = send(Request::new("GET", uri).map_err(|_| HistoryError::InvalidResponse)?)
+            .map_err(|_| HistoryError::Transport)?;
+        match response.status {
+            200..=299 => (),
+            401 | 403 => return Err(HistoryError::Permission),
+            429 => return Err(HistoryError::Throttled),
+            404 | 410 => return Err(HistoryError::Unavailable),
+            _ => return Err(HistoryError::FailedPage),
+        }
+        if response.body.len() > MAX_BODY {
+            return Err(HistoryError::InvalidResponse);
+        }
+        let page: Vec<DiscordMessage> =
+            serde_json::from_slice(&response.body).map_err(|_| HistoryError::InvalidResponse)?;
+        if page.len() > limit {
+            return Err(HistoryError::InvalidResponse);
+        }
+        let full = page.len() == limit;
+        let oldest = page.last().map(|message| message.id.clone());
+        for message in page {
+            if !message.id.bytes().all(|b| b.is_ascii_digit())
+                || message.id.is_empty()
+                || message.id.len() > 32
+            {
+                return Err(HistoryError::InvalidResponse);
+            }
+            messages.push(Message {
+                id: bounded(&message.id, 64),
+                author: bounded(&message.author.id, 256),
+                time: bounded(&message.timestamp, 64),
+                text: bounded(&message.content, MAX_TEXT),
+                assets: message
+                    .attachments
+                    .into_iter()
+                    .take(10)
+                    .map(|asset| Asset {
+                        id: bounded(&asset.id, 256),
+                        name: bounded(&asset.filename, 256),
+                        mime: bounded(&asset.content_type, 128),
+                        size: asset.size,
+                        available: false,
+                    })
+                    .collect(),
+            });
+        }
+        if !full {
+            break;
+        }
+        truncated = true;
+        if messages.len() == count as usize || page_number == 1 {
+            break;
+        }
+        before = oldest;
+    }
+    messages.sort_by(|a, b| a.time.cmp(&b.time).then(a.id.cmp(&b.id)));
+    Ok(History {
+        messages,
+        truncated,
+    })
 }
 
 fn bounded(value: &str, max: usize) -> String {
@@ -426,6 +573,94 @@ mod tests {
     fn native_missing_messages_cannot_masquerade_as_empty_history() {
         let result = read_slack(1, &SLACK, &mut |_| response(200, json!({"ok":true})));
         assert!(matches!(result, Err(HistoryError::InvalidResponse)));
+    }
+
+    #[test]
+    fn native_discord_pages_bound_count_and_preserve_descriptive_assets() {
+        let page: Vec<_> = (151..=200)
+            .rev()
+            .map(|id| {
+                json!({
+                    "id": id.to_string(), "author":{"id":"raw-user"},
+                    "timestamp": format!("2026-01-01T00:00:{:02}Z", id - 150),
+                    "content": "earlier text", "attachments": if id == 200 {
+                        vec![json!({"id":"F1","filename":"photo.png","content_type":"image/png"})]
+                    } else { vec![] }
+                })
+            })
+            .collect();
+        let mut calls = Vec::new();
+        let result = read_discord(51, &DISCORD, &mut |request| {
+            calls.push(request.uri);
+            if calls.len() == 1 { response(200, json!(page)) } else {
+                response(200, json!([{"id":"150","author":{"id":"raw-first"},"timestamp":"2026-01-01T00:00:00Z","content":"first"}]))
+            }
+        }).expect("bounded read");
+        assert_eq!(
+            calls,
+            [
+                "https://discord.com/api/v10/channels/{conversation.apiChannel}/messages?limit=50",
+                "https://discord.com/api/v10/channels/{conversation.apiChannel}/messages?limit=1&before=151",
+            ]
+        );
+        assert_eq!(result.messages.len(), 51);
+        assert_eq!(result.messages[0].text, "first");
+        assert_eq!(result.messages[50].author, "raw-user");
+        let output = serde_json::to_value(&result).expect("output");
+        assert_eq!(output["messages"][50]["assets"][0]["available"], false);
+        assert!(output["messages"][50]["assets"][0]["size"].is_null());
+        assert!(result.truncated);
+    }
+
+    #[test]
+    fn native_discord_empty_errors_failed_page_and_decoded_byte_limit() {
+        let empty = read_discord(2, &DISCORD, &mut |_| response(200, json!([]))).expect("empty");
+        assert!(empty.messages.is_empty());
+        assert!(!empty.truncated);
+        for (status, expected) in [
+            (403, HistoryError::Permission),
+            (429, HistoryError::Throttled),
+            (404, HistoryError::Unavailable),
+            (500, HistoryError::FailedPage),
+        ] {
+            assert!(
+                matches!(read_discord(1, &DISCORD, &mut |_| response(status, json!({}))), Err(e) if e == expected)
+            );
+        }
+        assert!(matches!(
+            read_discord(1, &DISCORD, &mut |_| response(
+                200,
+                json!({"message":"error"})
+            )),
+            Err(HistoryError::InvalidResponse)
+        ));
+        assert!(matches!(
+            read_discord(1, &DISCORD, &mut |_| Ok(Response {
+                status: 200,
+                headers: vec![],
+                body: vec![b'x'; MAX_BODY + 1]
+            })),
+            Err(HistoryError::InvalidResponse)
+        ));
+        let page: Vec<_> = (151..=200)
+            .rev()
+            .map(|id| {
+                json!({
+                    "id":id.to_string(), "author":{"id":"U"}, "timestamp":"2026-01-01T00:00:00Z"
+                })
+            })
+            .collect();
+        let mut calls = 0;
+        let failed = read_discord(51, &DISCORD, &mut |_| {
+            calls += 1;
+            if calls == 1 {
+                response(200, json!(page))
+            } else {
+                response(500, json!({}))
+            }
+        });
+        assert!(matches!(failed, Err(HistoryError::FailedPage)));
+        assert_eq!(calls, 2);
     }
 
     #[test]
