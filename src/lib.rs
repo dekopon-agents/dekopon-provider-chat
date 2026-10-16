@@ -166,7 +166,7 @@ struct Page {
     ok: bool,
     #[serde(default)]
     error: Option<String>,
-    messages: Vec<SlackMessage>,
+    messages: Option<Vec<SlackMessage>>,
     #[serde(default)]
     has_more: bool,
     #[serde(default)]
@@ -269,11 +269,12 @@ fn read_slack(
                 _ => HistoryError::FailedPage,
             });
         }
-        let length = page.messages.len();
+        let page_messages = page.messages.ok_or(HistoryError::InvalidResponse)?;
+        let length = page_messages.len();
         if length > count as usize - messages.len() {
             return Err(HistoryError::InvalidResponse);
         }
-        for message in page.messages {
+        for message in page_messages {
             if timestamp(&message.ts).is_none() {
                 return Err(HistoryError::InvalidResponse);
             }
