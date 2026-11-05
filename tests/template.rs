@@ -57,6 +57,30 @@ async fn missing_thread_and_foreign_channel_or_timestamp_deny_before_dns() {
 }
 
 #[tokio::test]
+async fn auth_test_with_a_query_or_non_get_method_denies_before_dns() {
+    denied(true, "/api/auth.test?user=Uforeign").await;
+    denied(true, "/api/auth.revoke").await;
+    let mut client = BufferedHttpClient::authorized(
+        constraints("slack"),
+        HttpHostCeilings::default(),
+        Duration::from_secs(2),
+    )
+    .expect("valid constraint")
+    .with_chat_slots(slots(true));
+    let error = client
+        .send(Request {
+            method: "POST".into(),
+            uri: "https://unresolvable.invalid/api/auth.test".into(),
+            headers: vec![],
+            body: vec![],
+        })
+        .await
+        .expect_err("non-GET auth.test denies before DNS");
+    assert!(matches!(error.code, ErrorCode::Denied));
+    assert!(client.into_evidence().is_empty());
+}
+
+#[tokio::test]
 async fn discord_foreign_channel_denies_before_dns() {
     let grant = constraints("discord");
     let mut slots = ChatSlotValues::default();
@@ -176,4 +200,43 @@ async fn attested_root_slots_only_send_their_own_replies_uri() {
         );
         assert!(!captured.contains("conversations.history"));
     }
+}
+
+#[tokio::test]
+async fn attested_slots_admit_only_a_query_free_auth_test() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    let listener = TcpListener::bind("127.0.0.1:0").expect("fixture listener");
+    let address = listener.local_addr().expect("fixture address");
+    let receiver = std::thread::spawn(move || {
+        let (mut socket, _) = listener.accept().expect("one request");
+        let mut bytes = [0; 2048];
+        let n = socket.read(&mut bytes).expect("request bytes");
+        socket
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+            .expect("reply");
+        String::from_utf8_lossy(&bytes[..n]).to_string()
+    });
+    let mut grant = constraints("slack");
+    grant.allowed_hosts = vec![address.to_string()];
+    grant.allow_plaintext_loopback = true;
+    let mut client =
+        BufferedHttpClient::authorized(grant, HttpHostCeilings::default(), Duration::from_secs(3))
+            .expect("valid grant")
+            .with_chat_slots(slots(true));
+    let response = client
+        .send(Request {
+            method: "GET".into(),
+            uri: format!("http://{address}/api/auth.test"),
+            headers: vec![],
+            body: vec![],
+        })
+        .await
+        .expect("identity read");
+    assert_eq!(response.status, 200);
+    let captured = receiver.join().expect("receiver");
+    assert!(
+        captured.starts_with("GET /api/auth.test HTTP/1.1\r\n"),
+        "{captured}"
+    );
 }

@@ -30,7 +30,7 @@ capabilities:
           http:
             allowedHosts: [slack.com]
             allowedMethods: [GET]
-            maxRequests: 2
+            maxRequests: 3
             maxRequestBytes: 1024
             maxResponseBytes: 524288
             requestTemplates:
@@ -39,6 +39,8 @@ capabilities:
                 query:
                   pinned: {channel: conversation.id, ts: conversation.thread}
                   allowed: [limit, cursor]
+              - method: GET
+                path: /api/auth.test
       chat.discord.history.read:
         credential: discord-history
         constraints:

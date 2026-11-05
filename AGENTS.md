@@ -11,7 +11,7 @@ The Chat provider for Dekopon is one Wasm component with platform-specific, read
 ## Chat boundaries
 
 - Only broker-attested conversation slots select a channel/thread. No model-facing channel, thread, workspace or URL input; no generic HTTP passthrough or history fallback.
-- Slack reads only `conversations.replies` at the claimed thread; Discord reads only the attested API channel. Each capability has its own credential binding and GET request template. No write capability or provider asset fetch.
+- Slack reads only `conversations.replies` at the claimed thread, plus at most one query-free `auth.test` per invocation, sent only when a returned message carries the bot's marked footer, to learn the bot's own user ID; Discord reads only the attested API channel. Each capability has its own credential binding and GET request template. No write capability or provider asset fetch.
 - The guest never sets `authorization`. The broker injects destination-bound credentials after request validation. Do not expose tokens, private response headers, URLs or platform error bodies in outputs.
 - A history attachment is metadata only (`available:false`); it cannot be fetched by this provider. Bound messages, pages and output text; decoded response bytes are bounded by the broker's `maxResponseBytes` grant, not by a separate guest cap. A failed page is not an empty success.
 
