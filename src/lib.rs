@@ -431,6 +431,19 @@ fn read_slack(
         }
         let page: Page =
             serde_json::from_slice(&response.body).map_err(|_| HistoryError::InvalidResponse)?;
+        let page_messages = page
+            .messages
+            .map(|messages| {
+                messages
+                    .into_iter()
+                    .map(|raw| {
+                        let message: SlackMessage = serde_json::from_str(raw.get())
+                            .map_err(|_| HistoryError::InvalidResponse)?;
+                        Ok((message, serde_json::from_str::<Recognition>(raw.get()).ok()))
+                    })
+                    .collect::<Result<Vec<_>, HistoryError>>()
+            })
+            .transpose()?;
         if !page.ok {
             return Err(match page.error.as_deref() {
                 Some("ratelimited") => HistoryError::Throttled,
@@ -442,16 +455,7 @@ fn read_slack(
                 _ => HistoryError::FailedPage,
             });
         }
-        let page_messages = page
-            .messages
-            .ok_or(HistoryError::InvalidResponse)?
-            .into_iter()
-            .map(|raw| {
-                let message: SlackMessage =
-                    serde_json::from_str(raw.get()).map_err(|_| HistoryError::InvalidResponse)?;
-                Ok((message, serde_json::from_str::<Recognition>(raw.get()).ok()))
-            })
-            .collect::<Result<Vec<_>, HistoryError>>()?;
+        let page_messages = page_messages.ok_or(HistoryError::InvalidResponse)?;
         let length = page_messages.len();
         for (message, recognition) in page_messages {
             if timestamp(&message.ts).is_none() {
@@ -871,6 +875,23 @@ mod tests {
     }
 
     #[test]
+    fn native_slack_malformed_messages_on_an_error_page_stay_invalid_response() {
+        for page in [
+            json!({"ok":false,"error":"ratelimited","messages":[{"ts":5}]}),
+            json!({"ok":false,"error":"invalid_auth","messages":[42]}),
+            json!({"ok":false,"messages":[{"ts":"1760000000.000001","text":5}]}),
+        ] {
+            assert!(
+                matches!(
+                    read_slack(1, &SLACK, &mut |_| response(200, page.clone())),
+                    Err(HistoryError::InvalidResponse)
+                ),
+                "{page}"
+            );
+        }
+    }
+
+    #[test]
     fn native_missing_messages_cannot_masquerade_as_empty_history() {
         let result = read_slack(1, &SLACK, &mut |_| response(200, json!({"ok":true})));
         assert!(matches!(result, Err(HistoryError::InvalidResponse)));
@@ -1055,6 +1076,13 @@ mod tests {
             .as_array_mut()
             .expect("blocks")
             .push(json!({"type":"divider"}));
+        let mut not_uploaded = reply(BOT, true, &answered, marked());
+        not_uploaded["upload"] = json!(false);
+        let mut upload_absent = reply(BOT, true, &answered, marked());
+        upload_absent
+            .as_object_mut()
+            .expect("message")
+            .remove("upload");
         let element = |elements| footer_block(MARKER, elements);
         let mut cases = vec![
             (reply(BOT, true, &answered, marked()), "Synthetic answer."),
@@ -1130,6 +1158,8 @@ mod tests {
                 "Synthetic answer. Posted by the release bot",
             ),
         ];
+        cases.push((not_uploaded, answered.as_str()));
+        cases.push((upload_absent, answered.as_str()));
         let malformed: Vec<_> = [
             "\u{203a} model-a \u{b7} 1 steps \u{b7} 3 s",
             "\u{203a} model-a \u{b7} 2 step \u{b7} 3 s",
