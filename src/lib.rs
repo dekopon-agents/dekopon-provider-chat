@@ -880,11 +880,25 @@ mod tests {
             json!({"ok":false,"error":"ratelimited","messages":[{"ts":5}]}),
             json!({"ok":false,"error":"invalid_auth","messages":[42]}),
             json!({"ok":false,"messages":[{"ts":"1760000000.000001","text":5}]}),
+            json!({"ok":false,"error":"ratelimited","messages":[{"ts":"1760000000.000001","user":5}]}),
+            json!({"ok":false,"error":"thread_not_found","messages":[{"ts":"1760000000.000001","files":"F1"}]}),
         ] {
             assert!(
                 matches!(
                     read_slack(1, &SLACK, &mut |_| response(200, page.clone())),
                     Err(HistoryError::InvalidResponse)
+                ),
+                "{page}"
+            );
+        }
+        for page in [
+            json!({"ok":false,"error":"ratelimited"}),
+            json!({"ok":false,"error":"ratelimited","messages":null}),
+        ] {
+            assert!(
+                matches!(
+                    read_slack(1, &SLACK, &mut |_| response(200, page.clone())),
+                    Err(HistoryError::Throttled)
                 ),
                 "{page}"
             );
