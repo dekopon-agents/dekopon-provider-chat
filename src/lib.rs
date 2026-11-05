@@ -961,7 +961,7 @@ mod tests {
     }
 
     const BOT: &str = "U_SYNTHETIC_BOT";
-    const FOOTER: &str = "\u{203a} gpt-6-luna \u{b7} 2 steps \u{b7} 3 s";
+    const FOOTER: &str = "\u{203a} model-a \u{b7} 2 steps \u{b7} 3 s";
     const MARKER: &str = "dekopon-footer:00000000-0000-4000-8000-000000000001";
     const REPLIES: &str = "https://slack.com/api/conversations.replies?limit=200";
     const AUTH_TEST: &str = "https://slack.com/api/auth.test";
@@ -1104,11 +1104,11 @@ mod tests {
             ),
         ];
         let malformed: Vec<_> = [
-            "\u{203a} gpt-6-luna \u{b7} 1 steps \u{b7} 3 s",
-            "\u{203a} gpt-6-luna \u{b7} 2 step \u{b7} 3 s",
-            "\u{203a} gpt-6-luna \u{b7} 02 steps \u{b7} 3 s",
-            "> gpt-6-luna \u{b7} 2 steps \u{b7} 3 s",
-            "\u{203a} gpt-6-luna \u{b7} 2 steps \u{b7} 18446744073709551616 s",
+            "\u{203a} model-a \u{b7} 1 steps \u{b7} 3 s",
+            "\u{203a} model-a \u{b7} 2 step \u{b7} 3 s",
+            "\u{203a} model-a \u{b7} 02 steps \u{b7} 3 s",
+            "> model-a \u{b7} 2 steps \u{b7} 3 s",
+            "\u{203a} model-a \u{b7} 2 steps \u{b7} 18446744073709551616 s",
         ]
         .into_iter()
         .map(|line| {

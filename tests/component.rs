@@ -142,7 +142,7 @@ fn component_discord_refuses_invalid_input_and_native_reads_earlier_text()
     Ok(())
 }
 
-const FOOTER: &str = "\u{203a} gpt-6-luna \u{b7} 2 steps \u{b7} 3 s";
+const FOOTER: &str = "\u{203a} model-a \u{b7} 2 steps \u{b7} 3 s";
 
 fn marked_upload(user: &str) -> Value {
     json!({
