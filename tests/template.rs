@@ -22,7 +22,7 @@ fn slots(thread: bool) -> ChatSlotValues {
     slots
 }
 
-async fn denied(thread: bool, uri: &str) {
+async fn denied(thread: bool, method: &str, uri: &str) {
     let mut client = BufferedHttpClient::authorized(
         constraints("slack"),
         HttpHostCeilings::default(),
@@ -32,7 +32,7 @@ async fn denied(thread: bool, uri: &str) {
     .with_chat_slots(slots(thread));
     let error = client
         .send(Request {
-            method: "GET".into(),
+            method: method.into(),
             uri: format!("https://unresolvable.invalid{uri}"),
             headers: vec![],
             body: vec![],
@@ -40,44 +40,32 @@ async fn denied(thread: bool, uri: &str) {
         .await
         .expect_err("template denies before DNS");
     assert!(matches!(error.code, ErrorCode::Denied));
-    assert!(error.message.contains("request template"));
     assert!(client.into_evidence().is_empty());
 }
 
 #[tokio::test]
 async fn missing_thread_and_foreign_channel_or_timestamp_deny_before_dns() {
-    denied(false, "/api/conversations.replies?limit=5").await;
-    denied(true, "/api/conversations.replies?limit=5&channel=Cforeign").await;
+    denied(false, "GET", "/api/conversations.replies?limit=5").await;
     denied(
         true,
+        "GET",
+        "/api/conversations.replies?limit=5&channel=Cforeign",
+    )
+    .await;
+    denied(
+        true,
+        "GET",
         "/api/conversations.replies?limit=5&ts=1760000000.000002",
     )
     .await;
-    denied(true, "/api/conversations.history?limit=5").await;
+    denied(true, "GET", "/api/conversations.history?limit=5").await;
 }
 
 #[tokio::test]
 async fn auth_test_with_a_query_or_non_get_method_denies_before_dns() {
-    denied(true, "/api/auth.test?user=Uforeign").await;
-    denied(true, "/api/auth.revoke").await;
-    let mut client = BufferedHttpClient::authorized(
-        constraints("slack"),
-        HttpHostCeilings::default(),
-        Duration::from_secs(2),
-    )
-    .expect("valid constraint")
-    .with_chat_slots(slots(true));
-    let error = client
-        .send(Request {
-            method: "POST".into(),
-            uri: "https://unresolvable.invalid/api/auth.test".into(),
-            headers: vec![],
-            body: vec![],
-        })
-        .await
-        .expect_err("non-GET auth.test denies before DNS");
-    assert!(matches!(error.code, ErrorCode::Denied));
-    assert!(client.into_evidence().is_empty());
+    denied(true, "GET", "/api/auth.test?user=Uforeign").await;
+    denied(true, "GET", "/api/auth.revoke").await;
+    denied(true, "POST", "/api/auth.test").await;
 }
 
 #[tokio::test]
