@@ -209,7 +209,7 @@ struct Page {
     ok: bool,
     #[serde(default)]
     error: Option<String>,
-    messages: Option<Vec<SlackMessage>>,
+    messages: Option<Vec<Box<RawValue>>>,
     #[serde(default)]
     has_more: bool,
     #[serde(default)]
@@ -231,6 +231,10 @@ struct SlackMessage {
     text: String,
     #[serde(default)]
     files: Vec<SlackFile>,
+}
+
+#[derive(Deserialize)]
+struct Recognition {
     #[serde(default)]
     upload: Option<Box<RawValue>>,
     #[serde(default)]
@@ -438,18 +442,37 @@ fn read_slack(
                 _ => HistoryError::FailedPage,
             });
         }
-        let page_messages = page.messages.ok_or(HistoryError::InvalidResponse)?;
+        let page_messages = page
+            .messages
+            .ok_or(HistoryError::InvalidResponse)?
+            .into_iter()
+            .map(|raw| {
+                let message: SlackMessage =
+                    serde_json::from_str(raw.get()).map_err(|_| HistoryError::InvalidResponse)?;
+                Ok((message, serde_json::from_str::<Recognition>(raw.get()).ok()))
+            })
+            .collect::<Result<Vec<_>, HistoryError>>()?;
         let length = page_messages.len();
-        for message in page_messages {
+        for (message, recognition) in page_messages {
             if timestamp(&message.ts).is_none() {
                 return Err(HistoryError::InvalidResponse);
             }
-            let footer = message.blocks.as_deref().and_then(marked_footer);
+            let upload = recognition
+                .as_ref()
+                .and_then(|recognition| recognition.upload.as_deref())
+                .is_some_and(|upload| {
+                    serde_json::from_str::<bool>(upload.get()).is_ok_and(|upload| upload)
+                });
+            let footer = recognition
+                .as_ref()
+                .and_then(|recognition| recognition.blocks.as_deref())
+                .and_then(marked_footer);
             marked |= footer.is_some();
             if messages.iter().any(|seen: &Message| seen.id == message.ts) {
                 continue;
             }
             let candidate = footer
+                .filter(|_| upload)
                 .and_then(|footer| footer_free_text(&message, &footer))
                 .map(|answer| (message.user.clone(), bounded(answer, MAX_TEXT)));
             messages.push(Message {
@@ -527,10 +550,7 @@ fn slack_bot_user(
 }
 
 fn footer_free_text<'a>(message: &'a SlackMessage, footer: &str) -> Option<&'a str> {
-    let upload = message.upload.as_deref().is_some_and(|upload| {
-        serde_json::from_str::<bool>(upload.get()).is_ok_and(|upload| upload)
-    });
-    if message.user.is_empty() || !upload || message.files.is_empty() {
+    if message.user.is_empty() || message.files.is_empty() {
         return None;
     }
     if message.text == footer {
@@ -971,6 +991,7 @@ mod tests {
     const MARKER: &str = "dekopon-footer:00000000-0000-4000-8000-000000000001";
     const REPLIES: &str = "https://slack.com/api/conversations.replies?limit=200";
     const AUTH_TEST: &str = "https://slack.com/api/auth.test";
+    const REPLIES_20: &str = "https://slack.com/api/conversations.replies?limit=20";
 
     fn footer_block(id: &str, elements: serde_json::Value) -> serde_json::Value {
         json!({"type":"context","block_id":id,"elements":elements})
@@ -1177,12 +1198,51 @@ mod tests {
 
     #[test]
     fn native_slack_strips_before_bounding_so_truncation_cannot_hide_the_footer() {
-        let answer = "a".repeat(MAX_TEXT);
+        let answer = "a".repeat(MAX_TEXT - 1);
         let (result, _) = read_page(
             vec![reply(BOT, true, &format!("{answer} {FOOTER}"), marked())],
             response(200, identity()),
         );
         assert_eq!(result.expect("long answer").messages[0].text, answer);
+    }
+
+    #[test]
+    fn native_slack_repeated_recognition_keys_keep_the_message_and_its_files() {
+        let marked_upload = reply(BOT, true, &format!("Synthetic answer. {FOOTER}"), marked())
+            .to_string()
+            .replacen('{', r#"{"ts":"1760000000.000003","#, 1);
+        for (repeated, calls) in [
+            (r#""blocks":[],"blocks":[]"#, vec![REPLIES_20]),
+            (r#""upload":true,"upload":true"#, vec![REPLIES_20]),
+            (r#""blocks":[],"blocks":[]"#, vec![REPLIES_20, AUTH_TEST]),
+        ] {
+            let mut page = format!(
+                r#"{{"ts":"1760000000.000001","user":"{BOT}","text":"keep me","files":[{{"id":"F1","name":"cat.png","mimetype":"image/png"}}],{repeated}}}"#
+            );
+            if calls.len() == 2 {
+                page = format!("{page},{marked_upload}");
+            }
+            let body = format!(r#"{{"ok":true,"messages":[{page}]}}"#);
+            let mut sent = Vec::new();
+            let result = read_slack(5, &SLACK, &mut |request| {
+                sent.push(request.uri.clone());
+                if request.uri == AUTH_TEST {
+                    return response(200, identity());
+                }
+                Ok(Response {
+                    status: 200,
+                    headers: vec![],
+                    body: body.clone().into_bytes(),
+                })
+            })
+            .expect("repeated metadata keys are not a malformed page");
+            assert_eq!(sent, calls, "{repeated}");
+            assert_eq!(result.messages[0].text, "keep me");
+            assert_eq!(result.messages[0].assets[0].id, "F1");
+            if let Some(stripped) = result.messages.get(1) {
+                assert_eq!(stripped.text, "Synthetic answer.");
+            }
+        }
     }
 
     #[test]
