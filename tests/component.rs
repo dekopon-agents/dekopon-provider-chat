@@ -141,3 +141,72 @@ fn component_discord_refuses_invalid_input_and_native_reads_earlier_text()
     assert_eq!(result["truncated"], false);
     Ok(())
 }
+
+const FOOTER: &str = "\u{203a} model-a \u{b7} 2 steps \u{b7} 3 s";
+
+fn marked_upload(user: &str) -> Value {
+    json!({
+        "ts":"1760000000.000002","user":user,"bot_id":"B_SYNTHETIC_BOT","upload":true,
+        "text":format!("Synthetic answer. {FOOTER}"),
+        "files":[{"id":"F_SYNTHETIC_IMAGE","name":"cat.png","mimetype":"image/png","size":42}],
+        "blocks":[
+            {"type":"rich_text","elements":[{"type":"rich_text_section","elements":[{"type":"text","text":"Synthetic answer."}]}]},
+            {"type":"context","block_id":"dekopon-footer:00000000-0000-4000-8000-000000000001",
+             "elements":[{"type":"plain_text","text":FOOTER}]}
+        ]
+    })
+}
+
+fn slack_read(page_and_identity: Value) -> (Value, Vec<String>) {
+    let native = Native::<Chat>::new().http(HttpScript::new(
+        "slack.com",
+        "GET",
+        response(page_and_identity),
+    ));
+    let read = native.call("chat.slack.history.read", &json!({"count":1}).to_string());
+    assert_eq!(read.status, 0, "{}", read.stderr);
+    let sent = native.requests();
+    assert!(sent.iter().all(|request| {
+        request
+            .headers
+            .iter()
+            .all(|h| !h.name.eq_ignore_ascii_case("authorization"))
+    }));
+    (
+        serde_json::from_slice(&read.stdout).expect("history JSON"),
+        sent.into_iter().map(|request| request.uri).collect(),
+    )
+}
+
+#[test]
+fn native_chat_output_drops_the_bots_marked_footer_after_one_auth_test() {
+    let (result, uris) = slack_read(json!({
+        "ok":true,"user_id":"U_SYNTHETIC_BOT","url":"https://private.example/","team":"Private Team",
+        "messages":[marked_upload("U_SYNTHETIC_BOT")]
+    }));
+    assert_eq!(
+        uris,
+        [
+            "https://slack.com/api/conversations.replies?limit=20",
+            "https://slack.com/api/auth.test",
+        ]
+    );
+    assert_eq!(
+        result,
+        json!({"messages":[{"id":"1760000000.000002","author":"U_SYNTHETIC_BOT","time":"1760000000.000002",
+            "text":"Synthetic answer.","assets":[{"id":"F_SYNTHETIC_IMAGE","name":"cat.png","mime":"image/png",
+            "size":42,"available":false}]}],"truncated":false})
+    );
+}
+
+#[test]
+fn native_chat_output_keeps_a_foreign_authors_marked_footer() {
+    let (result, uris) = slack_read(json!({
+        "ok":true,"user_id":"U_SYNTHETIC_BOT","messages":[marked_upload("U_SYNTHETIC_HUMAN")]
+    }));
+    assert_eq!(uris.len(), 2);
+    assert_eq!(
+        result["messages"][0]["text"],
+        format!("Synthetic answer. {FOOTER}")
+    );
+}
